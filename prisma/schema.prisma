@@ -1,0 +1,217 @@
+// CreatorHub backend schema.
+// Fields like `ageVerified`, `idVerificationStatus`, `moderationStatus`, and
+// `csamScanStatus` are compliance hooks — see BACKEND-AND-DEPLOYMENT-GUIDE.md
+// section 3. They exist so the real verification/scanning vendors can plug in
+// without a schema rewrite later. Don't remove them, and don't treat
+// "pending" as safe to publish.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  FAN
+  CREATOR
+  ADMIN
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum ModerationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ScanStatus {
+  PENDING
+  CLEAR
+  FLAGGED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+}
+
+model User {
+  id                    String              @id @default(cuid())
+  email                 String              @unique
+  passwordHash          String
+  name                  String
+  handle                String              @unique
+  avatarUrl             String?
+  bio                   String?
+  role                  Role                @default(FAN)
+
+  // Compliance: age/identity verification (required before a CREATOR can publish,
+  // and required for viewers in jurisdictions with age-verification laws).
+  ageVerified           Boolean             @default(false)
+  idVerificationStatus  VerificationStatus  @default(UNVERIFIED)
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  creatorProfile        CreatorProfile?
+  posts                 Post[]
+  subscriptionsAsFan    Subscription[]      @relation("FanSubscriptions")
+  paymentMethods        PaymentMethod[]
+  sentMessages          Message[]           @relation("SentMessages")
+  conversationsAsFan    Conversation[]      @relation("FanConversations")
+  conversationsAsCreator Conversation[]     @relation("CreatorConversations")
+  notifications         Notification[]
+}
+
+model CreatorProfile {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  user            User      @relation(fields: [userId], references: [id])
+  category        String
+  monthlyPrice    Int       // in cents
+  coverUrl        String?
+
+  // Compliance: 2257 record custodian reference — the *actual* ID documents
+  // and consent forms must be stored by your verification vendor / legal
+  // custodian of records, NOT as plain files in your app database.
+  recordsCustodianRef String?
+
+  bankAccount     BankAccount?
+  subscribers     Subscription[]  @relation("CreatorSubscriptions")
+  payouts         Payout[]
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model Post {
+  id                String            @id @default(cuid())
+  creatorId         String
+  creator           User              @relation(fields: [creatorId], references: [id])
+  type              String            // "image" | "video" | "text"
+  caption           String
+  mediaUrl          String?
+  locked            Boolean           @default(true)
+
+  // Compliance gates — a post must NOT be visible to fans unless BOTH are true.
+  moderationStatus  ModerationStatus  @default(PENDING)
+  csamScanStatus    ScanStatus        @default(PENDING)
+
+  likeCount         Int               @default(0)
+  commentCount      Int               @default(0)
+
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+}
+
+model Subscription {
+  id          String              @id @default(cuid())
+  fanId       String
+  fan         User                @relation("FanSubscriptions", fields: [fanId], references: [id])
+  creatorId   String
+  creator     CreatorProfile      @relation("CreatorSubscriptions", fields: [creatorId], references: [id])
+  status      SubscriptionStatus  @default(ACTIVE)
+  priceCents  Int
+  startedAt   DateTime            @default(now())
+  renewsAt    DateTime?
+  canceledAt  DateTime?
+
+  transactions Transaction[]
+
+  @@unique([fanId, creatorId])
+}
+
+model Transaction {
+  id              String        @id @default(cuid())
+  subscriptionId  String
+  subscription    Subscription  @relation(fields: [subscriptionId], references: [id])
+  amountCents     Int
+  platformFeeCents Int
+  provider        String        // e.g. "ccbill", "segpay" — never "stripe" for explicit content
+  providerRef     String?       // external transaction id from the payment processor
+  createdAt       DateTime      @default(now())
+}
+
+model PaymentMethod {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  brand      String
+  last4      String
+  expMonth   Int
+  expYear    Int
+  isDefault  Boolean  @default(false)
+  providerRef String  // token from the payment processor — never store raw card numbers
+  createdAt  DateTime @default(now())
+}
+
+model BankAccount {
+  id               String          @id @default(cuid())
+  creatorProfileId String          @unique
+  creatorProfile   CreatorProfile  @relation(fields: [creatorProfileId], references: [id])
+  bankName         String
+  accountHolder    String
+  last4            String
+  providerRef      String          // token from the payout provider — never store raw account numbers
+  createdAt        DateTime        @default(now())
+}
+
+model Payout {
+  id               String        @id @default(cuid())
+  creatorProfileId String
+  creatorProfile   CreatorProfile @relation(fields: [creatorProfileId], references: [id])
+  amountCents      Int
+  status           PayoutStatus  @default(PENDING)
+  providerRef      String?
+  requestedAt      DateTime      @default(now())
+  paidAt           DateTime?
+}
+
+model Conversation {
+  id         String     @id @default(cuid())
+  fanId      String
+  fan        User       @relation("FanConversations", fields: [fanId], references: [id])
+  creatorId  String
+  creator    User       @relation("CreatorConversations", fields: [creatorId], references: [id])
+  messages   Message[]
+  createdAt  DateTime   @default(now())
+
+  @@unique([fanId, creatorId])
+}
+
+model Message {
+  id              String        @id @default(cuid())
+  conversationId  String
+  conversation    Conversation  @relation(fields: [conversationId], references: [id])
+  senderId        String
+  sender          User          @relation("SentMessages", fields: [senderId], references: [id])
+  text            String
+  createdAt       DateTime      @default(now())
+}
+
+model Notification {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  type       String
+  text       String
+  read       Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+}
